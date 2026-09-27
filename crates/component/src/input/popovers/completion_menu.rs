@@ -240,7 +240,9 @@ impl CompletionMenu {
         cx.spawn_in(window, async move |_, cx| {
             editor.update_in(cx, |editor, window, cx| {
                 // Another input event may run before this deferred insertion.
-                if editor.cursor() == offset && ropes_are_instances(editor.text(), &text) {
+                if editor.cursor() == offset
+                    && (ropes_are_instances(editor.text(), &text) || editor.text() == &text)
+                {
                     editor.insert_completion(&item, range, window, cx);
                 } else {
                     editor.focus(window, cx);
