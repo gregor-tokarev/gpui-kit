@@ -7,6 +7,7 @@ use gpui::{
     deferred, div, prelude::FluentBuilder, px, relative,
 };
 use lsp_types::CompletionItem;
+use ropey::{Rope, extra::esoterica::ropes_are_instances};
 
 const MAX_MENU_HEIGHT: Pixels = px(240.);
 const POPOVER_GAP: Pixels = px(4.);
@@ -169,6 +170,7 @@ impl ListDelegate for ContextMenuDelegate {
 /// A context menu for code completions and code actions.
 pub struct CompletionMenu {
     offset: usize,
+    text: Option<Rope>,
     editor: WeakEntity<EditorState>,
     list: Entity<ListState<ContextMenuDelegate>>,
     open: bool,
@@ -214,6 +216,7 @@ impl CompletionMenu {
 
             Self {
                 offset: 0,
+                text: None,
                 editor: editor.downgrade(),
                 list,
                 open: false,
@@ -225,6 +228,10 @@ impl CompletionMenu {
     }
 
     fn select_item(&mut self, item: &CompletionItem, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(text) = self.text.clone() else {
+            return;
+        };
+        let offset = self.offset;
         let item = item.clone();
         let range = self.trigger_start_offset.unwrap_or(self.offset)..self.offset;
 
@@ -232,7 +239,12 @@ impl CompletionMenu {
 
         cx.spawn_in(window, async move |_, cx| {
             editor.update_in(cx, |editor, window, cx| {
-                editor.insert_completion(&item, range, window, cx);
+                // Another input event may run before this deferred insertion.
+                if editor.cursor() == offset && ropes_are_instances(editor.text(), &text) {
+                    editor.insert_completion(&item, range, window, cx);
+                } else {
+                    editor.focus(window, cx);
+                }
             })
         })
         .detach();
@@ -292,6 +304,7 @@ impl CompletionMenu {
     /// Hide the completion menu and reset the trigger start offset.
     pub(crate) fn hide(&mut self, cx: &mut Context<Self>) {
         self.open = false;
+        self.text = None;
         self.trigger_start_offset = None;
         let editor = self.editor.clone();
         cx.spawn(async move |_, cx| {
@@ -318,6 +331,10 @@ impl CompletionMenu {
     ) {
         let items = items.into();
         self.offset = offset;
+        self.text = self
+            .editor
+            .upgrade()
+            .map(|editor| editor.read(cx).text().clone());
         self.open = true;
         self.list.update(cx, |this, cx| {
             let longest_ix = items

@@ -10,6 +10,7 @@ pub struct CompletionMenuState {
     pub trigger_start_offset: Option<usize>,
     pub query: String,
     pub items: Vec<CompletionItem>,
+    pub(super) snapshot: Option<(ropey::Rope, usize)>,
     revision: u64,
 }
 
@@ -77,8 +78,13 @@ impl InputBaseState<EditorMode> {
             .trigger_start_offset = Some(trigger_start_offset);
         self.extras.context_menu_content.completion.query = query.into();
         self.extras.context_menu_content.completion.items = items;
+        self.extras.context_menu_content.completion.snapshot =
+            Some((self.text.clone(), self.cursor()));
         self.extras.context_menu_content.completion.open =
             !self.extras.context_menu_content.completion.items.is_empty();
+        if !self.extras.context_menu_content.completion.open {
+            self.extras.context_menu_content.completion.snapshot = None;
+        }
         self.extras.context_menu_content.completion.bump();
         cx.notify();
     }
@@ -152,6 +158,7 @@ impl InputBaseState<EditorMode> {
     pub fn dismiss_completion_overlay(&mut self, cx: &mut Context<Self>) {
         if self.extras.context_menu_content.completion.open {
             self.extras.context_menu_content.completion.open = false;
+            self.extras.context_menu_content.completion.snapshot = None;
             cx.notify();
         }
     }
