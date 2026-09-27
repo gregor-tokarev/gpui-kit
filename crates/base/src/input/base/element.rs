@@ -2852,6 +2852,33 @@ impl<M: InputModeKind> Element for TextElement<M> {
         let hitbox = window.insert_hitbox(input_bounds, HitboxBehavior::Normal);
 
         let token_elements = self.prepaint_tokens(&last_layout, bounds, token_elements, window, cx);
+
+        // Deferred overlays prepaint after the input and need this frame's
+        // caret and scroll geometry before positioning their hitboxes.
+        self.state.update(cx, |state, cx| {
+            let geometry_changed = state.last_bounds != Some(bounds)
+                || state.input_bounds != input_bounds
+                || state.scroll_size != scroll_size
+                || state.last_layout.as_ref().is_none_or(|layout| {
+                    layout.cursor_bounds != last_layout.cursor_bounds
+                        || layout.line_height != last_layout.line_height
+                });
+            state.last_layout = Some(last_layout.clone());
+            state.last_bounds = Some(bounds);
+            state.last_cursor = Some(state.cursor());
+            state.set_input_bounds(input_bounds, cx);
+            state.last_selected_range = Some(*state.active_selection());
+            state.scroll_size = scroll_size;
+            state.update_scroll_offset(Some(cursor_scroll_offset), cx);
+            state.deferred_scroll_offset = None;
+
+            // Layout consumers need changed geometry, not another notification
+            // for every paint of an unchanged input.
+            if geometry_changed {
+                cx.notify();
+            }
+        });
+
         PrepaintState {
             token_elements,
             hitbox,
@@ -2887,13 +2914,12 @@ impl<M: InputModeKind> Element for TextElement<M> {
         window: &mut Window,
         cx: &mut App,
     ) {
-        let (focus_handle, show_cursor, disabled, selected_range, editor_style, editor_paddings) = {
+        let (focus_handle, show_cursor, disabled, editor_style, editor_paddings) = {
             let state = self.state.read(cx);
             (
                 state.focus_handle.clone(),
                 state.show_cursor(window, cx),
                 state.disabled,
-                *state.active_selection(),
                 state.editor_style.clone(),
                 state.editor_paddings,
             )
@@ -3175,30 +3201,6 @@ impl<M: InputModeKind> Element for TextElement<M> {
             window,
             cx,
         );
-
-        self.state.update(cx, |state, cx| {
-            let geometry_changed = state.last_bounds != Some(bounds)
-                || state.input_bounds != input_bounds
-                || state.scroll_size != prepaint.scroll_size
-                || state.last_layout.as_ref().is_none_or(|layout| {
-                    layout.cursor_bounds != prepaint.last_layout.cursor_bounds
-                        || layout.line_height != prepaint.last_layout.line_height
-                });
-            state.last_layout = Some(prepaint.last_layout.clone());
-            state.last_bounds = Some(bounds);
-            state.last_cursor = Some(state.cursor());
-            state.set_input_bounds(input_bounds, cx);
-            state.last_selected_range = Some(selected_range);
-            state.scroll_size = prepaint.scroll_size;
-            state.update_scroll_offset(Some(prepaint.cursor_scroll_offset), cx);
-            state.deferred_scroll_offset = None;
-
-            // Layout consumers need changed geometry, not another notification
-            // for every paint of an unchanged input.
-            if geometry_changed {
-                cx.notify();
-            }
-        });
 
         if let Some(hitbox) = prepaint.hover_definition_hitbox.as_ref()
             && !window.modifiers().alt
@@ -3925,6 +3927,56 @@ mod tests {
                 point(px(10.5), px(2.5)),
             ]
         );
+    }
+
+    #[gpui::test]
+    fn caret_geometry_is_current_when_deferred_overlays_prepaint(cx: &mut gpui::TestAppContext) {
+        use gpui::{
+            AppContext as _, ParentElement as _, Render, Styled as _, canvas, deferred, div,
+        };
+
+        struct Probe(Entity<crate::input::EditorState>);
+
+        impl Render for Probe {
+            fn render(&mut self, _: &mut Window, _: &mut gpui::Context<Self>) -> impl IntoElement {
+                let before = self.0.clone();
+                let after = self.0.clone();
+                div().size_full().child(self.0.clone()).child(deferred(
+                    canvas(
+                        move |_, _, cx| {
+                            let state = before.read(cx);
+                            (state.cursor_layout(), state.scroll_offset())
+                        },
+                        move |_, geometry, _, cx| {
+                            let state = after.read(cx);
+                            assert!(
+                                geometry.0.is_some(),
+                                "the initial frame needs a caret anchor"
+                            );
+                            assert_eq!(
+                                geometry,
+                                (state.cursor_layout(), state.scroll_offset()),
+                                "overlay geometry must match the caret painted in the same frame"
+                            );
+                        },
+                    )
+                    .absolute(),
+                ))
+            }
+        }
+
+        cx.update(crate::init);
+        let (probe, cx) = cx.add_window_view(|window, cx| {
+            Probe(cx.new(|cx| {
+                crate::input::EditorState::new(window, cx).default_value("first line\nsecond line")
+            }))
+        });
+        let editor = probe.read_with(cx, |probe, _| probe.0.clone());
+        for offset in [3, 15, 1, 8] {
+            editor.update(cx, |editor, cx| {
+                editor.set_selected_range(offset..offset, cx)
+            });
+        }
     }
 
     #[test]
