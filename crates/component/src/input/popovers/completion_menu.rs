@@ -3,7 +3,7 @@ use std::rc::Rc;
 use gpui::{
     Action, AnyElement, App, AppContext, Context, DismissEvent, Empty, Entity, EventEmitter,
     Half as _, HighlightStyle, InteractiveElement as _, IntoElement, ParentElement, Pixels, Point,
-    Render, RenderOnce, SharedString, Styled, StyledText, Subscription, WeakEntity, Window,
+    Render, RenderOnce, SharedString, Styled, StyledText, Subscription, WeakEntity, Window, canvas,
     deferred, div, prelude::FluentBuilder, px, relative,
 };
 use lsp_types::CompletionItem;
@@ -349,14 +349,14 @@ impl CompletionMenu {
         let scroll_origin = editor.scroll_offset();
 
         Some(
-            scroll_origin + cursor_origin - editor.input_bounds().origin
+            Point::new(px(0.), scroll_origin.y) + cursor_origin - editor.input_bounds().origin
                 + Point::new(-px(4.), line_height + px(4.)),
         )
     }
 }
 
-impl Render for CompletionMenu {
-    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+impl CompletionMenu {
+    fn render_popover(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         if !self.open {
             return Empty.into_any_element();
         }
@@ -387,44 +387,71 @@ impl Render for CompletionMenu {
             abs_pos.x + configured_max + POPOVER_GAP + configured_max + POPOVER_GAP
                 > window.bounds().size.width;
 
-        deferred(
-            div()
-                .absolute()
-                .left(pos.x)
-                .top(pos.y)
-                .flex()
-                .flex_row()
-                .gap(POPOVER_GAP)
-                .items_start()
-                .when(vertical_layout, |this| this.flex_col())
-                .child(
-                    editor_popover("completion-menu", cx)
-                        .max_w(max_width)
-                        .min_w(px(120.))
-                        .child(List::new(&self.list).max_h(MAX_MENU_HEIGHT)),
-                )
-                .when_some(selected_documentation, |this, documentation| {
-                    let mut doc = match documentation {
-                        lsp_types::Documentation::String(s) => s.clone(),
-                        lsp_types::Documentation::MarkupContent(mc) => mc.value.clone(),
-                    };
-                    if vertical_layout {
-                        doc = doc.split("\n").next().unwrap_or_default().to_string();
-                    }
-
-                    this.child(
-                        div().child(
-                            editor_popover("completion-menu", cx)
-                                .w(configured_max)
-                                .px_2()
-                                .child(render_markdown("doc", doc, window, cx)),
-                        ),
+        div()
+            .size_full()
+            .child(
+                div()
+                    .absolute()
+                    .left(abs_pos.x)
+                    .top(abs_pos.y)
+                    .flex()
+                    .flex_row()
+                    .gap(POPOVER_GAP)
+                    .items_start()
+                    .when(vertical_layout, |this| this.flex_col())
+                    .child(
+                        editor_popover("completion-menu", cx)
+                            .debug_selector(|| "completion-menu".into())
+                            .max_w(max_width)
+                            .min_w(px(120.))
+                            .child(List::new(&self.list).max_h(MAX_MENU_HEIGHT)),
                     )
-                })
-                .on_mouse_down_out(cx.listener(|this, _, _, cx| {
-                    this.hide(cx);
-                })),
+                    .when_some(selected_documentation, |this, documentation| {
+                        let mut doc = match documentation {
+                            lsp_types::Documentation::String(s) => s.clone(),
+                            lsp_types::Documentation::MarkupContent(mc) => mc.value.clone(),
+                        };
+                        if vertical_layout {
+                            doc = doc.split("\n").next().unwrap_or_default().to_string();
+                        }
+
+                        this.child(
+                            div().child(
+                                editor_popover("completion-menu", cx)
+                                    .w(configured_max)
+                                    .px_2()
+                                    .child(render_markdown("doc", doc, window, cx)),
+                            ),
+                        )
+                    })
+                    .on_mouse_down_out(cx.listener(|this, _, _, cx| {
+                        this.hide(cx);
+                    })),
+            )
+            .into_any_element()
+    }
+}
+
+impl Render for CompletionMenu {
+    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let menu = cx.entity();
+
+        // Build the popup after the input has laid out this frame's caret.
+        deferred(
+            canvas(
+                move |_, window, cx| {
+                    let mut popover = menu.update(cx, |menu, cx| menu.render_popover(window, cx));
+                    popover.prepaint_as_root(
+                        Point::default(),
+                        window.viewport_size().map(gpui::AvailableSpace::Definite),
+                        window,
+                        cx,
+                    );
+                    popover
+                },
+                |_, mut popover, window, cx| popover.paint(window, cx),
+            )
+            .absolute(),
         )
-        .into_any_element()
     }
 }
