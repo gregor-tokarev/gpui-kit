@@ -181,6 +181,7 @@ impl InputBaseState<EditorMode> {
 
         let provider_responses =
             provider.completions(&self.text, new_offset, completion_context, window, cx);
+        let snapshot = (self.text.clone(), new_offset);
         self.extras.context_menu_task = cx.spawn_in(window, async move |editor, cx| {
             let mut completions: Vec<CompletionItem> = vec![];
             if let Some(provider_responses) = provider_responses.await.ok() {
@@ -194,6 +195,7 @@ impl InputBaseState<EditorMode> {
                 editor.update(cx, |editor, cx| {
                     editor.extras.context_menu_content.completion.open = false;
                     editor.extras.context_menu_content.completion.items.clear();
+                    editor.extras.context_menu_content.completion.snapshot = None;
                     editor.extras.context_menu_content.completion.bump();
                     cx.notify();
                 })?;
@@ -207,6 +209,7 @@ impl InputBaseState<EditorMode> {
                     }
 
                     editor.extras.context_menu_content.completion.items = completions;
+                    editor.extras.context_menu_content.completion.snapshot = Some(snapshot);
                     editor.extras.context_menu_content.completion.open = !editor
                         .extras
                         .context_menu_content
@@ -225,6 +228,7 @@ impl InputBaseState<EditorMode> {
 
     pub(crate) fn hide_context_menu(&mut self, cx: &mut Context<Self>) {
         self.extras.context_menu_content.completion.open = false;
+        self.extras.context_menu_content.completion.snapshot = None;
         self.extras.context_menu_content.code_action.open = false;
         self.extras.context_menu_task = Task::ready(Ok(()));
         cx.notify();
@@ -241,6 +245,20 @@ impl InputBaseState<EditorMode> {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> bool {
+        let completion = &self.extras.context_menu_content.completion;
+        if crate::input::Enter::is_primary(&*action)
+            && completion.open
+            && !completion.snapshot.as_ref().is_some_and(|(text, offset)| {
+                *offset == self.cursor()
+                    && ropey::extra::esoterica::ropes_are_instances(text, &self.text)
+            })
+        {
+            // Old suggestions remain visible during refresh, but Enter must
+            // never accept ranges produced for a different source or caret.
+            self.hide_context_menu(cx);
+            return false;
+        }
+
         let closes_overlay =
             crate::input::Enter::is_primary(&*action) || action.partial_eq(&crate::input::Escape);
         let kind = if self.extras.context_menu_content.completion.open {
@@ -257,7 +275,8 @@ impl InputBaseState<EditorMode> {
         if handled && closes_overlay {
             match kind {
                 super::InputOverlayKind::Completion => {
-                    self.extras.context_menu_content.completion.open = false
+                    self.extras.context_menu_content.completion.open = false;
+                    self.extras.context_menu_content.completion.snapshot = None;
                 }
                 super::InputOverlayKind::CodeAction => {
                     self.extras.context_menu_content.code_action.open = false
