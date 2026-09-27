@@ -250,7 +250,8 @@ impl InputBaseState<EditorMode> {
             && completion.open
             && !completion.snapshot.as_ref().is_some_and(|(text, offset)| {
                 *offset == self.cursor()
-                    && ropey::extra::esoterica::ropes_are_instances(text, &self.text)
+                    && (ropey::extra::esoterica::ropes_are_instances(text, &self.text)
+                        || text == &self.text)
             })
         {
             // Old suggestions remain visible during refresh, but Enter must
