@@ -22,6 +22,8 @@ pub(crate) fn input_highlighter_factory() -> gpui_base::input::InputHighlighterF
 #[cfg(feature = "tree-sitter")]
 mod highlighter;
 #[cfg(feature = "tree-sitter")]
+mod queries;
+#[cfg(feature = "tree-sitter")]
 mod languages;
 #[cfg(feature = "tree-sitter")]
 mod registry;
