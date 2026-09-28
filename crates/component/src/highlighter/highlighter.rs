@@ -30,7 +30,7 @@ const INJECTION_PARSE_TIMEOUT: Duration = Duration::from_millis(20);
 #[allow(unused)]
 pub struct SyntaxHighlighter {
     language: SharedString,
-    query: Option<Query>,
+    query: Option<Arc<Query>>,
     /// The full injections query. This is used to build injection layers during parsing.
     injections_query: Option<Arc<Query>>,
 
@@ -426,43 +426,11 @@ impl SyntaxHighlighter {
             .set_language(&grammar)
             .context("parse set_language")?;
 
-        // Concatenate the query strings, keeping track of the start offset of each section.
-        let mut query_source = String::new();
-        query_source.push_str(&config.injections);
-        let locals_query_offset = query_source.len();
-        query_source.push_str(&config.locals);
-        let highlights_query_offset = query_source.len();
-        query_source.push_str(&config.highlights);
-
-        // Construct a single query by concatenating the three query strings, but record the
-        // range of pattern indices that belong to each individual string.
-        let mut query = Query::new(&grammar, &query_source).context("new query")?;
-
-        let mut locals_pattern_index = 0;
-        let mut highlights_pattern_index = 0;
-        for i in 0..(query.pattern_count()) {
-            let pattern_offset = query.start_byte_for_pattern(i);
-            if pattern_offset < highlights_query_offset {
-                if pattern_offset < highlights_query_offset {
-                    highlights_pattern_index += 1;
-                }
-                if pattern_offset < locals_query_offset {
-                    locals_pattern_index += 1;
-                }
-            }
-        }
-
-        let injections_query = if !config.injections.is_empty() {
-            Query::new(&grammar, &config.injections).ok().map(Arc::new)
-        } else {
-            None
-        };
-
-        // Injection layers are computed separately during parsing, so do not
-        // emit injection captures from the main highlight query.
-        for pattern_index in 0..locals_pattern_index {
-            query.disable_pattern(pattern_index);
-        }
+        let queries = super::queries::language_queries(&grammar, &config)?;
+        let query = queries.query.clone();
+        let injections_query = queries.injections.clone();
+        let locals_pattern_index = queries.locals_pattern_index;
+        let highlights_pattern_index = queries.highlights_pattern_index;
 
         // Find all of the highlighting patterns that are disabled for nodes that
         // have been identified as local variables.
@@ -1332,6 +1300,43 @@ mod tests {
 
     use super::*;
     use crate::Colorize as _;
+
+    #[test]
+    fn shared_queries_keep_document_trees_independent() {
+        let mut first = SyntaxHighlighter::new("json");
+        let mut second = SyntaxHighlighter::new("json");
+        assert!(Arc::ptr_eq(
+            first.query.as_ref().unwrap(),
+            second.query.as_ref().unwrap(),
+        ));
+
+        let first_text = Rope::from("{\"first\": 1}");
+        let second_text = Rope::from("[true, false]");
+        assert!(first.update(None, &first_text, None));
+        assert!(second.update(None, &second_text, None));
+        assert_eq!(first.text(), &first_text);
+        assert_eq!(second.text(), &second_text);
+        assert_eq!(
+            first
+                .tree()
+                .unwrap()
+                .root_node()
+                .named_child(0)
+                .unwrap()
+                .kind(),
+            "object"
+        );
+        assert_eq!(
+            second
+                .tree()
+                .unwrap()
+                .root_node()
+                .named_child(0)
+                .unwrap()
+                .kind(),
+            "array"
+        );
+    }
 
     fn color_style(color: Hsla) -> HighlightStyle {
         let mut style = HighlightStyle::default();
