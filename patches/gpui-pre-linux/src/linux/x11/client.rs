@@ -119,6 +119,10 @@ enum RefreshState {
         refresh_rate: Duration,
         event_loop_token: RegistrationToken,
     },
+    /// Visible, but the window has not asked for a frame for a while.
+    Parked {
+        refresh_rate: Duration,
+    },
 }
 
 #[derive(Debug)]
@@ -191,6 +195,8 @@ pub struct X11ClientState {
 
     pub(crate) gpu_context: GpuContext,
     pub(crate) compositor_gpu: Option<CompositorGpuHint>,
+    /// Restarts parked refresh loops; see `FrameDemand`.
+    frame_ping: calloop::ping::Ping,
 
     pub(crate) scale_factor: f32,
 
@@ -525,6 +531,14 @@ impl X11Client {
             })
             .map_err(|err| anyhow!("Failed to initialize XDP event source: {err:?}"))?;
 
+        let (frame_ping, frame_ping_source) =
+            calloop::ping::make_ping().context("Failed to create the frame ping")?;
+        handle
+            .insert_source(frame_ping_source, |_, _, client: &mut X11Client| {
+                client.0.borrow_mut().resume_refresh_loops();
+            })
+            .map_err(|err| anyhow!("Failed to initialize the frame ping: {err:?}"))?;
+
         xcb_flush(&xcb_connection);
 
         Ok(X11Client(Rc::new(RefCell::new(X11ClientState {
@@ -542,6 +556,7 @@ impl X11Client {
             pinch_scale: 1.0,
             gpu_context: Rc::new(RefCell::new(None)),
             compositor_gpu,
+            frame_ping,
             scale_factor,
 
             xkb_context,
@@ -1661,6 +1676,7 @@ impl LinuxClient for X11Client {
             parent_window,
             supports_xinput_gestures,
             is_bgr,
+            state.frame_ping.clone(),
         )?;
         check_reply(
             || "Failed to set XdndAware property",
@@ -1922,8 +1938,13 @@ impl X11ClientState {
         match (is_visible, window_ref.refresh_state.take()) {
             (false, refresh_state @ Some(RefreshState::Hidden { .. }))
             | (false, refresh_state @ None)
-            | (true, refresh_state @ Some(RefreshState::PeriodicRefresh { .. })) => {
+            | (true, refresh_state @ Some(RefreshState::PeriodicRefresh { .. }))
+            | (true, refresh_state @ Some(RefreshState::Parked { .. })) => {
                 window_ref.refresh_state = refresh_state;
+            }
+            (false, Some(RefreshState::Parked { refresh_rate })) => {
+                window_ref.window.frame_demand.parked.set(false);
+                window_ref.refresh_state = Some(RefreshState::Hidden { refresh_rate });
             }
             (
                 false,
@@ -1994,6 +2015,48 @@ impl X11ClientState {
         }
     }
 
+    /// Stops the refresh loop of a visible window that has not asked for a
+    /// frame for a while. Returns whether it was running.
+    fn park_refresh_loop(&mut self, x_window: xproto::Window) -> bool {
+        let Some(window_ref) = self.windows.get_mut(&x_window) else {
+            return false;
+        };
+        let Some(RefreshState::PeriodicRefresh { refresh_rate, .. }) = window_ref.refresh_state
+        else {
+            return false;
+        };
+        window_ref.refresh_state = Some(RefreshState::Parked { refresh_rate });
+        window_ref.window.frame_demand.parked.set(true);
+        true
+    }
+
+    /// Restarts the parked refresh loops of windows that asked for a frame.
+    fn resume_refresh_loops(&mut self) {
+        let requested = self
+            .windows
+            .iter()
+            .filter_map(|(x_window, window_ref)| match window_ref.refresh_state {
+                Some(RefreshState::Parked { refresh_rate })
+                    if !window_ref.window.frame_demand.is_idle() =>
+                {
+                    Some((*x_window, refresh_rate))
+                }
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+
+        for (x_window, refresh_rate) in requested {
+            let event_loop_token = self.start_refresh_loop(x_window, refresh_rate);
+            if let Some(window_ref) = self.windows.get_mut(&x_window) {
+                window_ref.window.frame_demand.parked.set(false);
+                window_ref.refresh_state = Some(RefreshState::PeriodicRefresh {
+                    refresh_rate,
+                    event_loop_token,
+                });
+            }
+        }
+    }
+
     #[must_use]
     fn start_refresh_loop(
         &self,
@@ -2003,9 +2066,10 @@ impl X11ClientState {
         self.loop_handle
             .insert_source(calloop::timer::Timer::immediate(), {
                 move |mut instant, (), client| {
-                    let xcb_connection = {
+                    let (xcb_connection, frame_demand) = {
                         let mut state = client.0.borrow_mut();
                         let xcb_connection = state.xcb_connection.clone();
+                        let mut frame_demand = None;
                         if let Some(window) = state.windows.get_mut(&x_window) {
                             let window = window.window.clone();
                             drop(state);
@@ -2013,10 +2077,17 @@ impl X11ClientState {
                                 require_presentation: false,
                                 force_render: false,
                             });
+                            frame_demand = Some(window.frame_demand.clone());
                         }
-                        xcb_connection
+                        (xcb_connection, frame_demand)
                     };
                     client.process_x11_events(&xcb_connection).log_err();
+
+                    if frame_demand.is_some_and(|demand| demand.is_idle())
+                        && client.0.borrow_mut().park_refresh_loop(x_window)
+                    {
+                        return calloop::timer::TimeoutAction::Drop;
+                    }
 
                     // Take into account that some frames have been skipped
                     let now = Instant::now();

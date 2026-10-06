@@ -30,7 +30,14 @@ use x11rb::{
 };
 
 use std::{
-    cell::RefCell, ffi::c_void, fmt::Display, num::NonZeroU32, ptr::NonNull, rc::Rc, sync::Arc,
+    cell::{Cell, RefCell},
+    ffi::c_void,
+    fmt::Display,
+    num::NonZeroU32,
+    ptr::NonNull,
+    rc::Rc,
+    sync::Arc,
+    time::{Duration, Instant},
 };
 
 use super::{X11Display, XINPUT_ALL_DEVICE_GROUPS, XINPUT_ALL_DEVICES};
@@ -303,8 +310,46 @@ impl X11WindowState {
 pub(crate) struct X11WindowStatePtr {
     pub state: Rc<RefCell<X11WindowState>>,
     pub(crate) callbacks: Rc<RefCell<Callbacks>>,
+    pub(crate) frame_demand: Rc<FrameDemand>,
     xcb: Rc<XCBConnection>,
     pub(crate) x_window: xproto::Window,
+}
+
+/// When GPUI last asked a window for a frame. A visible window's refresh loop
+/// parks once the window has asked for none for a while, so an idle window
+/// stops waking the app at the display's refresh rate. Asking again restarts
+/// the loop.
+pub(crate) struct FrameDemand {
+    last_request: Cell<Instant>,
+    /// Whether the refresh loop is parked until the window asks for a frame.
+    pub(crate) parked: Cell<bool>,
+    /// Wakes the client to restart parked refresh loops.
+    wake: calloop::ping::Ping,
+}
+
+impl FrameDemand {
+    /// How long a refresh loop keeps running after the last frame request, so
+    /// that steady input does not stop and restart it between events.
+    const IDLE_BEFORE_PARKING: Duration = Duration::from_millis(100);
+
+    fn new(wake: calloop::ping::Ping) -> Self {
+        Self {
+            last_request: Cell::new(Instant::now()),
+            parked: Cell::new(false),
+            wake,
+        }
+    }
+
+    pub(crate) fn request(&self) {
+        self.last_request.set(Instant::now());
+        if self.parked.get() {
+            self.wake.ping();
+        }
+    }
+
+    pub(crate) fn is_idle(&self) -> bool {
+        self.last_request.get().elapsed() > Self::IDLE_BEFORE_PARKING
+    }
 }
 
 impl rwh::HasWindowHandle for RawWindow {
@@ -935,6 +980,7 @@ impl X11Window {
         parent_window: Option<X11WindowStatePtr>,
         supports_xinput_gestures: bool,
         is_bgr: bool,
+        frame_wake: calloop::ping::Ping,
     ) -> anyhow::Result<Self> {
         let ptr = X11WindowStatePtr {
             state: Rc::new(RefCell::new(X11WindowState::new(
@@ -956,6 +1002,7 @@ impl X11Window {
                 is_bgr,
             )?)),
             callbacks: Rc::new(RefCell::new(Callbacks::default())),
+            frame_demand: Rc::new(FrameDemand::new(frame_wake)),
             xcb: xcb.clone(),
             x_window,
         };
@@ -1697,6 +1744,11 @@ impl PlatformWindow for X11Window {
         self.0.state.borrow().fullscreen
     }
 
+    fn frame_waker(&self) -> Option<Rc<dyn Fn()>> {
+        let frame_demand = self.0.frame_demand.clone();
+        Some(Rc::new(move || frame_demand.request()))
+    }
+
     fn on_request_frame(&self, callback: Box<dyn FnMut(RequestFrameOptions)>) {
         self.0.callbacks.borrow_mut().request_frame = Some(callback);
     }
@@ -1764,6 +1816,8 @@ impl PlatformWindow for X11Window {
             }
 
             inner.force_render_after_recovery = true;
+            drop(inner);
+            self.0.frame_demand.request();
             return;
         }
 
@@ -1771,6 +1825,8 @@ impl PlatformWindow for X11Window {
 
         if inner.renderer.needs_redraw() {
             inner.force_render_after_recovery = true;
+            drop(inner);
+            self.0.frame_demand.request();
         }
     }
 

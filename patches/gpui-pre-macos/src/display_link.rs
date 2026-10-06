@@ -267,6 +267,22 @@ impl WindowFrameSource {
             unsubscribe(display_id, subscriber_id);
         }
     }
+
+    pub fn requester(&self) -> FrameRequester {
+        FrameRequester(self.frame_requests.clone())
+    }
+}
+
+/// Asks for one frame right away, outside the display's pacing, whether or
+/// not the source is subscribed to a display. Harmless after the window
+/// closes: its source is cancelled then, so the callback no longer runs.
+#[derive(Clone)]
+pub struct FrameRequester(DispatchRetained<DispatchSource>);
+
+impl FrameRequester {
+    pub fn request(&self) {
+        self.0.merge_data(1);
+    }
 }
 
 impl Drop for WindowFrameSource {

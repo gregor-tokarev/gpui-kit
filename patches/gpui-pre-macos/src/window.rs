@@ -77,7 +77,7 @@ use std::{
         Arc, Once, Weak,
         atomic::{AtomicBool, Ordering},
     },
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 const WINDOW_STATE_IVAR: &str = "windowState";
@@ -665,6 +665,9 @@ struct MacWindowState {
     cursor_style: CursorStyle,
     cursor_visible: Arc<AtomicBool>,
     frame_source: Option<WindowFrameSource>,
+    frame_demand: Arc<FrameDemand>,
+    /// When GPUI last asked for a frame.
+    last_frame_request: Instant,
     renderer: renderer::Renderer,
     request_frame_callback: Option<Box<dyn FnMut(RequestFrameOptions)>>,
     event_callback: Option<Box<dyn FnMut(PlatformInput) -> gpui::DispatchEventResult>>,
@@ -846,11 +849,13 @@ impl MacWindowState {
             // AppKit can temporarily report no screen while displays are being reconfigured.
             return;
         };
+        self.frame_source().start(display_id).log_err();
+    }
+
+    fn frame_source(&mut self) -> &mut WindowFrameSource {
         let data = self.native_view.as_ptr() as *mut c_void;
         self.frame_source
             .get_or_insert_with(|| WindowFrameSource::new(data, step))
-            .start(display_id)
-            .log_err();
     }
 
     fn stop_display_link(&mut self) {
@@ -1098,6 +1103,8 @@ impl MacWindow {
                 cursor_style: CursorStyle::Arrow,
                 cursor_visible,
                 frame_source: None,
+                frame_demand: Arc::default(),
+                last_frame_request: Instant::now(),
                 renderer: renderer::new_renderer(
                     renderer_context,
                     native_window as *mut _,
@@ -2009,6 +2016,19 @@ impl PlatformWindow for MacWindow {
                 .styleMask()
                 .contains(NSWindowStyleMask::NSFullScreenWindowMask)
         }
+    }
+
+    fn frame_waker(&self) -> Option<Rc<dyn Fn()>> {
+        let mut lock = self.0.as_ref().lock();
+        let frame_demand = lock.frame_demand.clone();
+        let requester = lock.frame_source().requester();
+        Some(Rc::new(move || {
+            frame_demand.requested.store(true, Ordering::Relaxed);
+            // A running display link serves the request on its next step.
+            if frame_demand.parked.load(Ordering::Relaxed) {
+                requester.request();
+            }
+        }))
     }
 
     fn on_request_frame(&self, callback: Box<dyn FnMut(RequestFrameOptions)>) {
@@ -3299,15 +3319,51 @@ extern "C" fn display_layer(this: &Object, _: Sel, _: id) {
     }
 }
 
+/// Frame requests from GPUI, shared with the waker it holds. A visible
+/// window's display link stops once the window has asked for no frame for a
+/// while, so an idle window stops waking the app on every display refresh.
+/// Asking again restarts the link.
+#[derive(Default)]
+struct FrameDemand {
+    /// Set when GPUI asks for a frame; each step takes it.
+    requested: AtomicBool,
+    /// Whether the display link is stopped until GPUI asks for a frame.
+    parked: AtomicBool,
+}
+
+/// How long a display link keeps running after the last frame request, so
+/// that steady input does not stop and restart it between events.
+const IDLE_BEFORE_PARKING: Duration = Duration::from_millis(100);
+
 extern "C" fn step(view: *mut c_void) {
     let view = view as id;
     let window_state = unsafe { get_window_state(&*view) };
     let mut lock = window_state.lock();
 
+    if lock.frame_demand.requested.swap(false, Ordering::Relaxed) {
+        lock.last_frame_request = Instant::now();
+        if lock.frame_demand.parked.swap(false, Ordering::Relaxed) {
+            lock.start_display_link();
+        }
+    } else if lock.frame_demand.parked.load(Ordering::Relaxed) {
+        // A step from a link that something else restarted, or one already
+        // queued when the link stopped.
+        lock.stop_display_link();
+        return;
+    }
+
     if let Some(mut callback) = lock.request_frame_callback.take() {
         drop(lock);
         callback(Default::default());
-        window_state.lock().request_frame_callback = Some(callback);
+        let mut lock = window_state.lock();
+        lock.request_frame_callback = Some(callback);
+
+        if lock.frame_demand.requested.load(Ordering::Relaxed) {
+            lock.last_frame_request = Instant::now();
+        } else if lock.last_frame_request.elapsed() > IDLE_BEFORE_PARKING {
+            lock.stop_display_link();
+            lock.frame_demand.parked.store(true, Ordering::Relaxed);
+        }
     }
 }
 
