@@ -1943,7 +1943,9 @@ impl X11ClientState {
                 window_ref.refresh_state = refresh_state;
             }
             (false, Some(RefreshState::Parked { refresh_rate })) => {
+                // Showing the window again starts its loop.
                 window_ref.window.frame_demand.parked.set(false);
+                window_ref.window.frame_demand.pending.set(false);
                 window_ref.refresh_state = Some(RefreshState::Hidden { refresh_rate });
             }
             (
@@ -2037,7 +2039,7 @@ impl X11ClientState {
             .iter()
             .filter_map(|(x_window, window_ref)| match window_ref.refresh_state {
                 Some(RefreshState::Parked { refresh_rate })
-                    if !window_ref.window.frame_demand.is_idle() =>
+                    if window_ref.window.frame_demand.pending.get() =>
                 {
                     Some((*x_window, refresh_rate))
                 }
@@ -2049,6 +2051,7 @@ impl X11ClientState {
             let event_loop_token = self.start_refresh_loop(x_window, refresh_rate);
             if let Some(window_ref) = self.windows.get_mut(&x_window) {
                 window_ref.window.frame_demand.parked.set(false);
+                window_ref.window.frame_demand.pending.set(false);
                 window_ref.refresh_state = Some(RefreshState::PeriodicRefresh {
                     refresh_rate,
                     event_loop_token,

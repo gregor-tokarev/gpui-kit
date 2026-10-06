@@ -323,6 +323,10 @@ pub(crate) struct FrameDemand {
     last_request: Cell<Instant>,
     /// Whether the refresh loop is parked until the window asks for a frame.
     pub(crate) parked: Cell<bool>,
+    /// Whether the window asked for a frame while parked. GPUI asks only when
+    /// a clean window becomes dirty, so the request stands until it is served,
+    /// however late the client gets to it.
+    pub(crate) pending: Cell<bool>,
     /// Wakes the client to restart parked refresh loops.
     wake: calloop::ping::Ping,
 }
@@ -336,13 +340,14 @@ impl FrameDemand {
         Self {
             last_request: Cell::new(Instant::now()),
             parked: Cell::new(false),
+            pending: Cell::new(false),
             wake,
         }
     }
 
     pub(crate) fn request(&self) {
         self.last_request.set(Instant::now());
-        if self.parked.get() {
+        if self.parked.get() && !self.pending.replace(true) {
             self.wake.ping();
         }
     }
