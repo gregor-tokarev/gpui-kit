@@ -1,4 +1,6 @@
 [workspace]
+# Patched copies of published GPUI crates; see patches/README.md.
+exclude = ["patches"]
 default-members = ["crates/story"]
 members = [
     "crates/kit",
