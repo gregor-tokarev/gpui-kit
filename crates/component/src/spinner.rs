@@ -5,10 +5,6 @@ use gpui::{
 };
 use instant::Duration;
 
-/// Each frame of an animation redraws the window, and a spinner can show for
-/// as long as a slow operation takes, so it turns in coarse steps.
-const FRAMES_PER_SECOND: f32 = 12.;
-
 /// A cycling loading spinner.
 #[derive(IntoElement)]
 pub struct Spinner {
@@ -26,16 +22,14 @@ impl Spinner {
             size: Size::Medium,
             speed: Duration::from_secs_f64(0.8),
             easing: Box::new(ease_in_out),
-            // `Loader` looks the same after a coarse step, so it would seem
-            // to stand still or turn backwards.
-            icon: Icon::new(IconName::LoaderCircle),
+            icon: Icon::new(IconName::Loader),
             color: None,
         }
     }
 
     /// Set specified icon for the spinner.
     ///
-    /// Default is [`IconName::LoaderCircle`].
+    /// Default is [`IconName::Loader`].
     ///
     /// Please ensure the icon used is suitable for a loading spinner.
     pub fn icon(mut self, icon: impl Into<Icon>) -> Self {
@@ -72,10 +66,7 @@ impl RenderOnce for Spinner {
                     .when_some(self.color, |this, color| this.text_color(color))
                     .with_animation(
                         "circle",
-                        Animation::new(self.speed)
-                            .repeat()
-                            .with_easing(self.easing)
-                            .with_max_fps(FRAMES_PER_SECOND),
+                        Animation::new(self.speed).repeat().with_easing(self.easing),
                         |this, delta| this.transform(Transformation::rotate(percentage(delta))),
                     ),
             )
