@@ -102,6 +102,8 @@ const NSFloatingWindowLevel: NSInteger = 3;
 #[allow(non_upper_case_globals)]
 const NSPopUpWindowLevel: NSInteger = 101;
 #[allow(non_upper_case_globals)]
+const NSWindowAnimationBehaviorNone: NSInteger = 2;
+#[allow(non_upper_case_globals)]
 const NSWindowAnimationBehaviorUtilityWindow: NSInteger = 4;
 #[allow(non_upper_case_globals)]
 const NSViewLayerContentsRedrawDuringViewResize: NSInteger = 2;
@@ -1221,6 +1223,14 @@ impl MacWindow {
                         native_window.setLevel_(NSNormalWindowLevel);
                         native_window.setAcceptsMouseMovedEvents_(NO);
                         add_mouse_tracking_area(tracking_view);
+
+                        // AppKit animates a new window onto the screen, and the app takes
+                        // no input until the animation ends, about 0.3 s after the window
+                        // first shows. Show it at once instead.
+                        let _: () = msg_send![
+                            native_window,
+                            setAnimationBehavior: NSWindowAnimationBehaviorNone
+                        ];
                     }
 
                     if let Some(tabbing_identifier) = tabbing_identifier {
