@@ -1,7 +1,7 @@
 use gpui::{
     AnyElement, App, ClickEvent, Context, DismissEvent, Edges, ElementId, Entity, EventEmitter,
-    FocusHandle, Focusable, Hsla, InteractiveElement, IntoElement, Length, ParentElement, Render,
-    RenderOnce, SharedString, StatefulInteractiveElement, StyleRefinement, Styled, Window,
+    FocusHandle, Focusable, Hsla, InteractiveElement, IntoElement, Length, ParentElement, Pixels,
+    Render, RenderOnce, SharedString, StatefulInteractiveElement, StyleRefinement, Styled, Window,
     deferred, div, prelude::FluentBuilder, px, rems,
 };
 use gpui_base::TestSupportExt as _;
@@ -87,6 +87,7 @@ struct SelectOptions {
     search_placeholder: Option<SharedString>,
     menu_width: Length,
     menu_max_h: Length,
+    keep_menu_height: bool,
     disabled: bool,
     appearance: bool,
     focus_ring_enabled: bool,
@@ -104,6 +105,7 @@ impl Default for SelectOptions {
             title_prefix: None,
             menu_width: Length::Auto,
             menu_max_h: rems(20.).into(),
+            keep_menu_height: false,
             disabled: false,
             appearance: true,
             focus_ring_enabled: true,
@@ -128,6 +130,9 @@ where
     icon: Option<Icon>,
     title_prefix: Option<SharedString>,
     focus_ring_enabled: bool,
+    keep_menu_height: bool,
+    /// The open menu's height before a search filters it.
+    menu_height: Option<Pixels>,
 }
 
 /// A Select element.
@@ -293,6 +298,8 @@ where
             icon: None,
             title_prefix: None,
             focus_ring_enabled: true,
+            keep_menu_height: false,
+            menu_height: None,
         }
     }
 
@@ -517,6 +524,17 @@ where
         let outline_visible = self.state.open || (is_focused && !self.state.disabled);
 
         let (bg, fg) = input_style(self.state.disabled, cx);
+        let filtering = !self
+            .state
+            .list
+            .read(cx)
+            .query_input
+            .read(cx)
+            .value()
+            .is_empty();
+        let menu_height = self
+            .menu_height
+            .filter(|_| self.keep_menu_height && filtering);
 
         self.state.list.update(cx, |list, cx| {
             list.set_searchable(searchable, cx);
@@ -615,6 +633,15 @@ where
                                     Length::Auto => this.w(bounds.size.width),
                                     Length::Definite(w) => this.w(w),
                                 })
+                                .when_some(menu_height, |this, height| this.h(height))
+                                .when(self.keep_menu_height && !filtering, |this| {
+                                    let state = cx.entity();
+                                    this.on_prepaint(move |bounds, _, cx| {
+                                        state.update(cx, |this, _| {
+                                            this.menu_height = Some(bounds.size.height)
+                                        })
+                                    })
+                                })
                                 .popover_style(cx)
                                 .child(
                                     List::new(&self.state.list)
@@ -669,6 +696,13 @@ where
     /// Set the max height of the dropdown menu, default: 20rem.
     pub fn menu_max_h(mut self, max_h: impl Into<Length>) -> Self {
         self.options.menu_max_h = max_h.into();
+        self
+    }
+
+    /// Keep the menu as tall as it opens while a search filters it, so the
+    /// search field stays put when the menu opens above the select.
+    pub fn keep_menu_height(mut self, keep: bool) -> Self {
+        self.options.keep_menu_height = keep;
         self
     }
 
@@ -821,6 +855,7 @@ where
             this.state.search_placeholder = opts.search_placeholder;
             this.state.menu_width = opts.menu_width;
             this.state.menu_max_h = opts.menu_max_h;
+            this.keep_menu_height = opts.keep_menu_height;
             this.state.disabled = opts.disabled;
             this.state.appearance = opts.appearance;
             this.focus_ring_enabled = opts.focus_ring_enabled;
