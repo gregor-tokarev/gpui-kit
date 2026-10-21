@@ -548,6 +548,7 @@ impl RenderOnce for Input {
                 background: cx.theme().editor_background(),
                 border: cx.theme().border,
                 selection: cx.theme().selection,
+                search_match: cx.theme().yellow,
                 caret: cx.theme().caret,
                 diagnostics: gpui_base::input::DiagnosticColors {
                     error: cx.theme().highlight_theme.style.status.error(cx),

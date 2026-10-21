@@ -3032,19 +3032,20 @@ impl<M: InputModeKind> Element for TextElement<M> {
             window.paint_path(path.clone(), *color);
         }
 
+        // Search matches belong to the search, not to focus: they stay visible
+        // while the search field holds focus and while the window is inactive.
+        // They have their own hue because themes keep the selection faint.
+        for (path, is_active) in prepaint.search_match_paths.iter() {
+            let alpha = if *is_active { 0.6 } else { 0.3 };
+            window.paint_path(path.clone(), editor_style.search_match.alpha(alpha));
+        }
+
         // Paint selections
         if window.is_window_active() {
             let secondary_selection = Hsla {
                 s: 0.1,
                 ..editor_style.selection
             };
-            for (path, is_active) in prepaint.search_match_paths.iter() {
-                window.paint_path(path.clone(), secondary_selection);
-
-                if *is_active {
-                    window.paint_path(path.clone(), editor_style.selection);
-                }
-            }
 
             for path in prepaint.selection_paths.drain(..) {
                 window.paint_path(path, editor_style.selection);

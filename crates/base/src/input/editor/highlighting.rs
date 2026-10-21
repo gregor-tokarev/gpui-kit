@@ -112,6 +112,9 @@ pub struct InputEditorStyle {
     pub background: Hsla,
     pub border: Hsla,
     pub selection: Hsla,
+    /// The hue of search matches. Painting sets its alpha: light for every
+    /// match and strong for the current one.
+    pub search_match: Hsla,
     pub caret: Hsla,
     pub diagnostics: DiagnosticColors,
     pub highlight_styles: SharedHighlightStyleResolver,
@@ -153,6 +156,7 @@ impl InputEditorStyle {
             background: or(self.background, colors.surface),
             border: or(self.border, colors.border),
             selection,
+            search_match: or(self.search_match, selection),
             caret: or(self.caret, foreground),
             ..self.clone()
         }
@@ -167,6 +171,7 @@ impl Default for InputEditorStyle {
             background: Hsla::default(),
             border: Hsla::default(),
             selection: Hsla::default(),
+            search_match: Hsla::default(),
             caret: Hsla::default(),
             diagnostics: DiagnosticColors::default(),
             highlight_styles: Arc::new(NoHighlightStyles),
@@ -212,6 +217,7 @@ mod tests {
             resolved.caret,
             resolved.muted_foreground,
             resolved.selection,
+            resolved.search_match,
         ] {
             assert!(colour.a > 0., "{colour:?} is still invisible");
         }
